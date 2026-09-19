@@ -107,8 +107,8 @@ def watcher():
             q = hits[src]
             while q and now - q[0][0] > WINDOW:
                 q.popleft()
-            for k, ts in list(conns[src].items()):         # forget connections held absurdly long
-                if now - ts > 120:
+            for k, ts in list(conns[src].items()):         # forget stale connections fast (no phantom slowloris)
+                if now - ts > 20:
                     del conns[src][k]
             if not q and not conns[src]:
                 del hits[src]; conns.pop(src, None); continue

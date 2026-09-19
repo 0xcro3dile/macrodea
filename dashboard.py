@@ -20,8 +20,12 @@ def alert_reader():                       # stream board MQTT alerts over ssh
                                   "mosquitto_sub -t ids/alerts"], stdout=subprocess.PIPE, text=True)
             for line in p.stdout:
                 line = line.strip()
-                if line:
-                    alerts.appendleft(line)
+                if not line:
+                    continue
+                try:
+                    m = json.loads(line); m["_ts"] = time.time(); alerts.appendleft(m)
+                except ValueError:
+                    pass
         except Exception:
             time.sleep(2)
 
@@ -189,6 +193,7 @@ h2{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)
 .ev .det{margin-left:auto;color:var(--dim);font-size:11px;font-family:var(--mono)}
 .ev.det-model .badge{background:#161f2e;color:var(--blue)}
 .empty{color:var(--dim);text-align:center;padding:26px;font-size:13px}
+.note{color:var(--dim);font-size:12px;margin-top:12px}.note code{color:var(--blue);font-family:var(--mono)}
 .foot{color:var(--dim);font-size:11.5px;text-align:center;padding:6px 0 2px}
 </style></head><body>
 <header>
@@ -204,18 +209,9 @@ h2{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)
       <div class="sub" id="herosub">no threats detected &middot; watching live traffic</div></div>
   </div>
 
-  <div class="cols">
-    <section class="panel"><h2>Live monitor &mdash; who's doing what</h2>
-      <div class="hosts" id="hosts"><div class="empty">discovering hosts&hellip;</div></div></section>
-    <section class="panel"><h2>Attack simulator</h2>
-      <div class="atk">
-        <button class="btn scan" onclick="fire('scan',this)"><span class="n">Port scan</span><span class="d">probe 1000 ports</span></button>
-        <button class="btn flood" onclick="fire('flood',this)"><span class="n">UDP flood</span><span class="d">packet storm</span></button>
-        <button class="btn bruteforce" onclick="fire('bruteforce',this)"><span class="n">Brute force</span><span class="d">hammer one port</span></button>
-        <button class="btn slowloris" onclick="fire('slowloris',this)"><span class="n">Slowloris</span><span class="d">hold connections</span></button>
-        <button class="btn normal" onclick="fire('normal',this)"><span class="n">Normal traffic</span><span class="d">behave &mdash; should stay silent</span></button>
-      </div></section>
-  </div>
+  <section class="panel"><h2>Live monitor &mdash; who's doing what</h2>
+    <div class="hosts" id="hosts"><div class="empty">discovering hosts&hellip;</div></div>
+    <div class="note">Defender view. Attacks come from the other PCs running <code>simulate.py</code> against the board &mdash; nothing is launched from here.</div></section>
 
   <section class="panel"><h2>Threat feed</h2>
     <div id="feed"><div class="empty">waiting for activity&hellip;</div></div></section>
@@ -224,56 +220,41 @@ h2{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)
 <script>
 const LAPTOP="10.42.0.1";
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
-function fire(t,b){b.disabled=true;const o=b.querySelector('.n').textContent;b.querySelector('.n').textContent='running…';
-  fetch('/attack?type='+t,{method:'POST'}).finally(()=>setTimeout(()=>{b.disabled=false;b.querySelector('.n').textContent=o},t==='slowloris'?17000:5200));}
-
-let lastKey=null, quiet=99;
 async function tick(){
-  let raw=[],peers=[];
-  try{raw=await (await fetch('/alerts')).json();}catch(e){}
+  let rows=[],peers=[];
+  try{rows=await (await fetch('/alerts')).json();}catch(e){}
   try{peers=await (await fetch('/peers')).json();}catch(e){}
-  const evs=raw.map(s=>{try{return JSON.parse(s)}catch(e){return null}}).filter(Boolean);
-  const now=Date.now();
-  // recent (last ~8s) attacks per source, keyed by src
-  const recent={};
-  for(const e of evs){ if(!recent[e.src]) recent[e.src]=e; }   // evs newest-first
-  const isFresh=evs.length && (()=>{const k=evs[0].time+evs[0].type+evs[0].src;
-    if(k!==lastKey){lastKey=k;quiet=0;}else{quiet++;} return quiet<8;})();
+  const nowS=Date.now()/1000;
+  const live=rows.filter(o=>o&&nowS-(o._ts||0)<8);      // truly current (real time)
+  const feed=rows.filter(o=>o&&nowS-(o._ts||0)<120);    // recent history only
 
-  // hosts = laptop + peers + any attacking src
   const hostmap={};
   hostmap[LAPTOP]={ip:LAPTOP,name:'laptop',up:true};
   for(const p of peers) hostmap[p.ip]={ip:p.ip,name:p.name,up:p.up};
-  for(const e of evs.slice(0,12)) if(!hostmap[e.src]) hostmap[e.src]={ip:e.src,name:e.who||'host',up:true};
-  const hosts=Object.values(hostmap);
-  document.getElementById('hosts').innerHTML = hosts.map(h=>{
-    const a = isFresh ? recent[h.ip] : null;
-    const threat = !!a;
-    const tag = threat ? a.type : (h.up?'quiet':'offline');
-    const conf = threat ? (a.detail||'') : '';
-    return `<div class="host ${threat?'threat':(h.up?'on':'')}">
-      <span class="dot"></span>
+  for(const o of feed.slice(0,12)) if(!hostmap[o.src]) hostmap[o.src]={ip:o.src,name:o.who||'host',up:true};
+  const recent={};
+  for(const o of live) if(!recent[o.src]) recent[o.src]=o;
+  document.getElementById('hosts').innerHTML = Object.values(hostmap).map(h=>{
+    const a=recent[h.ip], threat=!!a;
+    const tag=threat?a.type:(h.up?'quiet':'offline');
+    const conf=threat?(a.detail||''):'';
+    return `<div class="host ${threat?'threat':(h.up?'on':'')}"><span class="dot"></span>
       <div class="id"><b>${esc(h.name)}</b><span>${esc(h.ip)}</span></div>
       <div class="state"><div class="tag">${esc(tag)}</div><div class="conf">${esc(conf)}</div></div></div>`;
   }).join('') || '<div class="empty">no hosts</div>';
 
-  // hero
-  const hero=document.getElementById('hero'), big=document.getElementById('herobig'),
-        sub=document.getElementById('herosub');
-  if(isFresh){const e=evs[0]; hero.className='hero alarm';
-    big.textContent='UNDER ATTACK';
+  const hero=document.getElementById('hero'),big=document.getElementById('herobig'),sub=document.getElementById('herosub');
+  if(live.length){const e=live[0]; hero.className='hero alarm'; big.textContent='UNDER ATTACK';
     sub.innerHTML=`<b>${esc(e.type)}</b> from ${esc(e.who||'?')} (${esc(e.src)}) &middot; detected by ${esc(e.detector||'rule')}`;}
-  else{hero.className='hero safe'; big.textContent='SECURE';
-    sub.textContent='no threats detected · watching live traffic';}
+  else{hero.className='hero safe'; big.textContent='SECURE'; sub.textContent='no threats detected · watching live traffic';}
 
-  // feed
-  const feed=document.getElementById('feed');
-  feed.innerHTML = evs.length ? evs.map(e=>
+  const f=document.getElementById('feed');
+  f.innerHTML = feed.length ? feed.map(e=>
     `<div class="ev det-${esc(e.detector||'rule')}"><span class="t">${esc(e.time)}</span>
       <span class="badge">${esc(e.type)}</span>
       <span class="who">${esc(e.who||'?')}</span> <span class="ip">${esc(e.src)}</span>
       <span class="det">[${esc(e.detector||'rule')}] ${esc(e.detail||'')}</span></div>`).join('')
-    : '<div class="empty">waiting for activity…</div>';
+    : '<div class="empty">no recent activity</div>';
 }
 tick(); setInterval(tick,1000);
 </script></body></html>"""
