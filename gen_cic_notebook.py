@@ -5,10 +5,10 @@ md, code = nbf.v4.new_markdown_cell, nbf.v4.new_code_cell
 nb = nbf.v4.new_notebook(); cells = []
 
 cells.append(md(
-    "# cic-ids2017 — offline benchmark (RandomForest vs XGBoost, GPU)\n"
+    "# cic-ids2017 — offline benchmark (RandomForest vs XGBoost vs MLP)\n"
     "public benchmark on **CIC-IDS2017** (abluva/CIC-IDS-2017-V2), 40k balanced rows,\n"
-    "**78 flow features**. two strong tabular models compared; XGBoost trains on the RTX 3070.\n"
-    "note: this is the *offline* benchmark — the board runs our own 6-feature model (`train.ipynb`)."))
+    "**78 flow features**, mapped to our 5 classes. three models compared; XGBoost on the RTX 3070.\n"
+    "*offline* benchmark — the board runs our own 6-feature model (`train.ipynb`)."))
 
 cells.append(code(
     "%matplotlib inline\n"
@@ -16,7 +16,8 @@ cells.append(code(
     "import xgboost as xgb\n"
     "from sklearn.model_selection import train_test_split\n"
     "from sklearn.ensemble import RandomForestClassifier\n"
-    "from sklearn.preprocessing import LabelEncoder\n"
+    "from sklearn.neural_network import MLPClassifier\n"
+    "from sklearn.preprocessing import StandardScaler, LabelEncoder\n"
     "from sklearn.metrics import (classification_report, confusion_matrix,\n"
     "    ConfusionMatrixDisplay, accuracy_score)\n"
     "import warnings; warnings.filterwarnings('ignore')\n"
@@ -26,58 +27,55 @@ cells.append(code(
     "print('rows', len(df), '| features', len(FEATURES))\n"
     "print(df['label'].value_counts().to_string())"))
 
-cells.append(md("## detect GPU + prepare data"))
+cells.append(md("## detect GPU + prepare data (split + scale)"))
 cells.append(code(
     "try:\n"
     "    xgb.XGBClassifier(n_estimators=2, tree_method='hist', device='cuda').fit(\n"
     "        np.zeros((4,2),'float32'), [0,1,0,1])\n"
     "    DEVICE = 'cuda'\n"
-    "except Exception as e:\n"
-    "    DEVICE = 'cpu'; print('no gpu:', str(e)[:80])\n"
+    "except Exception:\n"
+    "    DEVICE = 'cpu'\n"
     "print('xgboost device:', DEVICE)\n"
     "\n"
     "X = df[FEATURES].to_numpy(dtype=float)\n"
     "le = LabelEncoder().fit(df['label'].astype(str).to_numpy())\n"
     "y = le.transform(df['label'].astype(str).to_numpy())\n"
     "Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.3, stratify=y, random_state=0)\n"
+    "sc = StandardScaler().fit(Xtr)\n"
+    "Xtr_s, Xte_s = sc.transform(Xtr), sc.transform(Xte)   # MLP needs scaling\n"
     "print('train', Xtr.shape, ' test', Xte.shape, ' classes', list(le.classes_))"))
 
-cells.append(md("## head-to-head — RandomForest (16 cores) vs XGBoost (gpu)"))
+cells.append(md("## three models head-to-head — RandomForest vs XGBoost (GPU) vs MLP"))
 cells.append(code(
-    "t = time.time()\n"
-    "rf = RandomForestClassifier(n_estimators=300, n_jobs=-1, random_state=0).fit(Xtr, ytr)\n"
-    "rf_t = time.time()-t; rf_acc = accuracy_score(yte, rf.predict(Xte))\n"
-    "\n"
-    "t = time.time()\n"
-    "xg = xgb.XGBClassifier(n_estimators=300, tree_method='hist', device=DEVICE, random_state=0).fit(Xtr, ytr)\n"
-    "xg_t = time.time()-t; xg_acc = accuracy_score(yte, xg.predict(Xte))\n"
-    "\n"
-    "print(f'RandomForest : acc {rf_acc:.4f}   train {rf_t:5.1f}s  (16 cpu cores)')\n"
-    "print(f'XGBoost      : acc {xg_acc:.4f}   train {xg_t:5.1f}s  ({DEVICE})')"))
+    "res = {}\n"
+    "t=time.time(); rf = RandomForestClassifier(n_estimators=300, n_jobs=-1, random_state=0).fit(Xtr, ytr)\n"
+    "res['RandomForest'] = (accuracy_score(yte, rf.predict(Xte)), time.time()-t, '16 cores')\n"
+    "t=time.time(); xg = xgb.XGBClassifier(n_estimators=300, tree_method='hist', device=DEVICE, random_state=0).fit(Xtr, ytr)\n"
+    "res['XGBoost'] = (accuracy_score(yte, xg.predict(Xte)), time.time()-t, DEVICE)\n"
+    "t=time.time(); mlp = MLPClassifier(hidden_layer_sizes=(64,32), max_iter=300, random_state=0).fit(Xtr_s, ytr)\n"
+    "res['MLP'] = (accuracy_score(yte, mlp.predict(Xte_s)), time.time()-t, 'cpu')\n"
+    "print(f\"{'model':14}{'accuracy':>10}{'train':>9}   hardware\")\n"
+    "for k,(a,tt,hw) in res.items(): print(f'{k:14}{a:>10.4f}{tt:>8.1f}s   {hw}')"))
 
-cells.append(md("## XGBoost — trees vs accuracy"))
-cells.append(code(
-    "sizes = [50, 100, 200, 400, 800]; acc = []\n"
-    "for n in sizes:\n"
-    "    m = xgb.XGBClassifier(n_estimators=n, tree_method='hist', device=DEVICE, random_state=0).fit(Xtr, ytr)\n"
-    "    acc.append(accuracy_score(yte, m.predict(Xte)))\n"
-    "plt.figure(figsize=(8,4)); plt.plot(sizes, acc, marker='o')\n"
-    "plt.xlabel('n_estimators'); plt.ylabel('test accuracy'); plt.grid(alpha=.3)\n"
-    "plt.title('xgboost: trees vs accuracy'); plt.show()\n"
-    "print('accuracies:', [round(a,4) for a in acc])"))
-
-cells.append(md("## best model (XGBoost) — report + confusion matrix"))
+cells.append(md("## XGBoost — report + confusion matrix"))
 cells.append(code(
     "pred = xg.predict(Xte)\n"
     "print('XGBoost test accuracy:', round(accuracy_score(yte, pred), 4))\n"
     "print(classification_report(yte, pred, target_names=le.classes_))\n"
     "fig, ax = plt.subplots(figsize=(6,6))\n"
-    "ConfusionMatrixDisplay(confusion_matrix(yte, pred),\n"
-    "    display_labels=le.classes_).plot(ax=ax, cmap='Blues', colorbar=False)\n"
-    "plt.title('CIC-IDS2017 — XGBoost confusion matrix'); plt.xticks(rotation=45)\n"
-    "plt.tight_layout(); plt.show()"))
+    "ConfusionMatrixDisplay(confusion_matrix(yte, pred), display_labels=le.classes_).plot(ax=ax, cmap='Blues', colorbar=False)\n"
+    "plt.title('CIC-IDS2017 — XGBoost'); plt.xticks(rotation=45); plt.tight_layout(); plt.show()"))
 
-cells.append(md("## which flow features drive it (XGBoost importance)"))
+cells.append(md("## MLP — report + confusion matrix (tested on CIC too)"))
+cells.append(code(
+    "predm = mlp.predict(Xte_s)\n"
+    "print('MLP test accuracy:', round(accuracy_score(yte, predm), 4))\n"
+    "print(classification_report(yte, predm, target_names=le.classes_))\n"
+    "fig, ax = plt.subplots(figsize=(6,6))\n"
+    "ConfusionMatrixDisplay(confusion_matrix(yte, predm), display_labels=le.classes_).plot(ax=ax, cmap='Purples', colorbar=False)\n"
+    "plt.title('CIC-IDS2017 — MLP'); plt.xticks(rotation=45); plt.tight_layout(); plt.show()"))
+
+cells.append(md("## top flow features (XGBoost importance)"))
 cells.append(code(
     "imp = pd.Series(xg.feature_importances_, index=FEATURES).sort_values()[-15:]\n"
     "plt.figure(figsize=(8,6)); imp.plot.barh()\n"
@@ -85,10 +83,10 @@ cells.append(code(
 
 cells.append(md(
     "## takeaway\n"
-    "- **XGBoost** on CIC-IDS2017 (78 flow features, 40k rows) — the strong public benchmark,\n"
-    "  trained on the **RTX 3070**; compared head-to-head with RandomForest above.\n"
-    "- these 78 flow features can't be computed live on the board, so the **on-board model\n"
-    "  stays our 6-feature one** (`train.ipynb`). benchmark = credibility; small model = the edge."))
+    "- three strong models on **CIC-IDS2017** (78 flow features) — XGBoost (GPU), RandomForest, MLP.\n"
+    "- all near-perfect; **XGBoost** is the headline benchmark.\n"
+    "- these 78 features can't be computed live on the board, so the **on-board model is our own\n"
+    "  6-feature one** (`train.ipynb`). benchmark = credibility; small model = the edge."))
 
 nb["cells"] = cells
 nbf.write(nb, "cic_benchmark.ipynb")

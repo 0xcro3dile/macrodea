@@ -2,7 +2,6 @@
 mlenv/
 tfenv/
 cic_parquet/
-cic_slice.csv
 # python
 __pycache__/
 *.pyc
