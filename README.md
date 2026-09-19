@@ -9,6 +9,8 @@ Detects: **port scan · flood · brute-force · slowloris · ARP spoof (MITM)**.
 
 ## How it works
 
+![architecture](architecture.png)
+
 The board sniffs its own `eth0`, turns traffic into a handful of features every
 second (per source), and classifies each source. Alerts go out over MQTT and land
 on a live dashboard that names the attacker.
