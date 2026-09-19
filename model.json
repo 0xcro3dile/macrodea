@@ -1,0 +1,1 @@
+{"features": ["pkts", "ports", "syns", "top_port", "held", "nic_pps"], "labels": ["bruteforce", "flood", "normal", "scan", "slowloris"], "scale": [5.2257466316223145, 3.97029185295105, 4.820281505584717, 4.094344615936279, 3.25809645652771, 11.50723934173584], "transform": "log1p"}

@@ -1,0 +1,16 @@
+# venvs & big downloads (regenerable)
+mlenv/
+tfenv/
+cic_parquet/
+cic_slice.csv
+# python
+__pycache__/
+*.pyc
+# runtime junk
+*.log
+capture.csv
+# os
+.DS_Store
+
+# jupyter
+.ipynb_checkpoints/

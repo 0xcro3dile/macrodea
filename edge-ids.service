@@ -1,0 +1,15 @@
+[Unit]
+Description=Edge IDS - simple counting-based intrusion detection (alerts on MQTT ids/alerts)
+After=network.target mosquitto.service
+Wants=mosquitto.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/ids
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /root/ids/simple_ids.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
