@@ -23,6 +23,7 @@ hits   = collections.defaultdict(collections.deque)   # src -> deque(t, dport, s
 conns  = collections.defaultdict(dict)                # src -> {(sport,dport): open_time}
 ipmac  = {}                                           # ip -> mac (arp watch)
 last   = {}
+lock   = threading.Lock()                             # guards hits/conns (sniff vs watcher threads)
 csv    = open("/root/ids/dataset.csv", "a") if RECORD else None
 if RECORD and os.path.getsize("/root/ids/dataset.csv") == 0:
     csv.write("ts,src,pkts,ports,syns,top_port,held,nic_pps,label\n")
@@ -81,13 +82,15 @@ def on_packet(pkt):
     if pkt.haslayer(TCP):
         fl, sp, dp = pkt[TCP].flags, pkt[TCP].sport, pkt[TCP].dport
         syn = bool(fl & 0x02 and not fl & 0x10)
-        if syn:
-            conns[src][(sp, dp)] = time.time()             # connection opened
-        elif fl & 0x01 or fl & 0x04:
-            conns[src].pop((sp, dp), None)                 # FIN/RST -> closed
-        hits[src].append((time.time(), dp, syn))
+        with lock:
+            if syn:
+                conns[src][(sp, dp)] = time.time()         # connection opened
+            elif fl & 0x01 or fl & 0x04:
+                conns[src].pop((sp, dp), None)             # FIN/RST -> closed
+            hits[src].append((time.time(), dp, syn))
     elif pkt.haslayer(UDP):
-        hits[src].append((time.time(), pkt[UDP].dport, False))
+        with lock:
+            hits[src].append((time.time(), pkt[UDP].dport, False))
 
 
 def rx():
@@ -98,39 +101,47 @@ def watcher():
     r0, t0 = rx(), time.time()
     while True:
         time.sleep(1)
-        r1, t1 = rx(), time.time()
-        pps = (r1 - r0) / (t1 - t0); r0, t0 = r1, t1
-        now = time.time()
-        if pps > FLOOD_PPS:
-            alert("flood", max(hits, key=lambda s: len(hits[s]), default="?"), f"{int(pps)} pkt/s")
-        for src in list(hits):
-            q = hits[src]
-            while q and now - q[0][0] > WINDOW:
-                q.popleft()
-            for k, ts in list(conns[src].items()):         # forget stale connections fast (no phantom slowloris)
-                if now - ts > 20:
-                    del conns[src][k]
-            if not q and not conns[src]:
-                del hits[src]; conns.pop(src, None); continue
-            ports = {d for _, d, _ in q}
-            syns = collections.Counter(d for _, d, s in q if s)
-            top = max(syns.values(), default=0)
-            held = collections.Counter(d for _, d in conns[src] if d != 22).most_common(1)  # ignore mgmt ssh
-            held_n = held[0][1] if held else 0
-            active = len(q) >= 15 or len(ports) > 4 or held_n > 4    # ignore trickle traffic
-            if MODEL and active:                       # AI model makes the call
-                lab, conf = model_predict([len(q), len(ports), sum(syns.values()), top, held_n, int(pps)])
-                if lab != "normal" and conf >= 0.75:      # ignore low-confidence guesses
-                    alert(lab, src, f"model {int(conf*100)}% (ports={len(ports)} held={held_n})", detector="model")
-            elif len(ports) > SCAN_PORTS:              # rules (fallback when no model)
-                alert("scan", src, f"{len(ports)} ports in {WINDOW}s")
-            elif held_n > LORIS_CONNS and pps < FLOOD_PPS:
-                alert("slowloris", src, f"{held_n} connections held open on port {held[0][0]}")
-            elif top > BF_HITS and len(ports) <= 3:
-                alert("bruteforce", src, f"{top} attempts on port {syns.most_common(1)[0][0]}")
-            if csv:
-                csv.write(f"{now:.0f},{src},{len(q)},{len(ports)},{sum(syns.values())},{top},{held_n},{int(pps)},{RECORD}\n")
-                csv.flush()
+        try:
+            r1, t1 = rx(), time.time()
+            pps = (r1 - r0) / (t1 - t0); r0, t0 = r1, t1
+            now = time.time()
+            snap = []                                       # (src, packets, conn_ports) snapshots
+            with lock:                                      # snapshot fast, then compute lock-free
+                for src in list(hits):
+                    q = hits[src]
+                    while q and now - q[0][0] > WINDOW:
+                        q.popleft()
+                    for k, ts in list(conns[src].items()):  # forget stale connections fast
+                        if now - ts > 20:
+                            del conns[src][k]
+                    if not q and not conns[src]:
+                        del hits[src]; conns.pop(src, None); continue
+                    snap.append((src, list(q), list(conns[src])))
+            if pps > FLOOD_PPS:
+                loud = max(snap, key=lambda e: len(e[1]))[0] if snap else "?"
+                alert("flood", loud, f"{int(pps)} pkt/s")
+            for src, qlist, cports in snap:
+                ports = {d for _, d, _ in qlist}
+                syns = collections.Counter(d for _, d, s in qlist if s)
+                top = max(syns.values(), default=0)
+                held = collections.Counter(d for _, d in cports if d != 22).most_common(1)  # ignore mgmt ssh
+                held_n = held[0][1] if held else 0
+                active = len(qlist) >= 15 or len(ports) > 4 or held_n > 4    # ignore trickle
+                if MODEL and active:                       # AI model makes the call
+                    lab, conf = model_predict([len(qlist), len(ports), sum(syns.values()), top, held_n, int(pps)])
+                    if lab != "normal" and conf >= 0.75:
+                        alert(lab, src, f"model {int(conf*100)}% (ports={len(ports)} held={held_n})", detector="model")
+                elif len(ports) > SCAN_PORTS:              # rules (fallback when no model)
+                    alert("scan", src, f"{len(ports)} ports in {WINDOW}s")
+                elif held_n > LORIS_CONNS and pps < FLOOD_PPS:
+                    alert("slowloris", src, f"{held_n} connections held open on port {held[0][0]}")
+                elif top > BF_HITS and len(ports) <= 3:
+                    alert("bruteforce", src, f"{top} attempts on port {syns.most_common(1)[0][0]}")
+                if csv:
+                    csv.write(f"{now:.0f},{src},{len(qlist)},{len(ports)},{sum(syns.values())},{top},{held_n},{int(pps)},{RECORD}\n")
+                    csv.flush()
+        except Exception as e:
+            print("watcher error (continuing):", e, flush=True)
 
 
 if __name__ == "__main__":
