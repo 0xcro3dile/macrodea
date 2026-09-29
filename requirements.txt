@@ -1,0 +1,11 @@
+# PC side: training, notebooks and tests. The board doesn't need any of this.
+# Tested with Python 3.12. On macOS use "tensorflow" instead of "tensorflow-cpu".
+tensorflow-cpu==2.21.*
+numpy
+pandas
+scikit-learn
+xgboost
+matplotlib
+jupyterlab
+scapy
+pytest

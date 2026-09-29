@@ -1,0 +1,22 @@
+[Unit]
+Description=edge-ids network intrusion detection
+After=network.target mosquitto.service
+Wants=mosquitto.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/ids
+Environment=PYTHONUNBUFFERED=1
+# Adjust to your network if needed, then: systemctl daemon-reload && systemctl restart edge-ids
+#   IDS_IFACE  interface to watch (default eth0)
+#   IDS_LAN    source prefixes to analyse (default: all private ranges)
+#   IDS_NAMES  friendly names for alerts
+# Environment=IDS_IFACE=eth0
+# Environment=IDS_LAN=192.168.1.
+# Environment=IDS_NAMES=192.168.1.10=plc,192.168.1.20=hmi
+ExecStart=/usr/bin/python3 /root/ids/edge_ids.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
